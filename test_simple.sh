@@ -22,12 +22,15 @@ curl -X POST "${ENDPOINT}/chat/completions" \
       {
         "role": "user",
         "content": [
-          {"type": "text", "text": "Extract all text from this image, with format coordinates in the response"},
-          {"type": "image_url", "image_url": {"url": "'"${IMAGE_URL}"'"}}
+          {"type": "image_url", "image_url": {"url": "'"${IMAGE_URL}"'"}},
+          {"type": "text", "text": "Detect and recognize text in the image, and output the text coordinates in a formatted manner."}
         ]
       }
     ],
-    "max_tokens": 2000
+    "temperature": 0.0,
+    "top_k": 1,
+    "repetition_penalty": 1.0,
+    "max_tokens": 3000
   }' | python3 -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2, ensure_ascii=False))"
 
 echo ""
