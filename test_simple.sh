@@ -22,13 +22,13 @@ curl -X POST "${ENDPOINT}/chat/completions" \
       {
         "role": "user",
         "content": [
-          {"type": "text", "text": "Extract all text from this image"},
+          {"type": "text", "text": "Extract all text from this image, with format coordinates in the response"},
           {"type": "image_url", "image_url": {"url": "'"${IMAGE_URL}"'"}}
         ]
       }
     ],
     "max_tokens": 2000
-  }' | python3 -m json.tool
+  }' | python3 -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2, ensure_ascii=False))"
 
 echo ""
 echo "================================================================================"
