@@ -1,9 +1,20 @@
 #!/bin/bash
 
-# Simplest possible cURL test for HunyuanOCR API
+# HunyuanOCR API Test Script with Coordinate Conversion
+#
+# Usage: ./test_simple.sh [image_width image_height]
+#   Example: ./test_simple.sh 2428 1438
+#   Example: ./test_simple.sh   # Will try to auto-detect dimensions
+#
+# Note: HunyuanOCR outputs coordinates normalized to [0-1000] range.
+#       Provide image dimensions to convert to actual pixel coordinates.
 
 ENDPOINT="https://hunyuan-ocr.ashybay-2b080a17.japaneast.azurecontainerapps.io/v1"
-IMAGE_URL="https://ev-cuhk.net/tmp/image-771x1024_156936ba.png"
+IMAGE_URL="https://ev-cuhk.net/tmp/t01.jpg"
+
+# Optional: specify image dimensions as arguments
+IMAGE_WIDTH="${1:-}"
+IMAGE_HEIGHT="${2:-}"
 
 echo "================================================================================"
 echo "Testing HunyuanOCR API with cURL"
@@ -34,6 +45,7 @@ curl -s -X POST "${ENDPOINT}/chat/completions" \
   }' | python3 -c "
 import sys, json, re
 import urllib.request
+import struct
 
 # ============================================================================
 # HunyuanOCR Coordinate System Documentation:
@@ -49,21 +61,72 @@ import urllib.request
 # ============================================================================
 
 IMAGE_URL = '${IMAGE_URL}'
+# Command-line provided dimensions (if any)
+CMD_WIDTH = '${IMAGE_WIDTH}' or None
+CMD_HEIGHT = '${IMAGE_HEIGHT}' or None
+
+def get_image_size_from_bytes(data):
+    '''Get image dimensions from raw bytes without PIL'''
+    # Check for PNG
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        w, h = struct.unpack('>LL', data[16:24])
+        return int(w), int(h)
+    
+    # Check for JPEG
+    if data[:2] == b'\xff\xd8':
+        idx = 2
+        while idx < len(data):
+            if data[idx] != 0xff:
+                idx += 1
+                continue
+            marker = data[idx+1]
+            if marker == 0xd9:  # EOI
+                break
+            if marker == 0xc0 or marker == 0xc2:  # SOF0 or SOF2
+                h, w = struct.unpack('>HH', data[idx+5:idx+9])
+                return int(w), int(h)
+            if marker in (0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0x01):
+                idx += 2
+            else:
+                length = struct.unpack('>H', data[idx+2:idx+4])[0]
+                idx += 2 + length
+        return None
+    
+    # Check for GIF
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        w, h = struct.unpack('<HH', data[6:10])
+        return int(w), int(h)
+    
+    # Check for BMP
+    if data[:2] == b'BM':
+        w, h = struct.unpack('<II', data[18:26])
+        return int(w), int(h)
+    
+    return None
 
 def get_image_dimensions(url):
     '''Fetch image and get its dimensions'''
     try:
-        # Try to get image dimensions from header first (faster)
-        from PIL import Image
-        from io import BytesIO
-        
         with urllib.request.urlopen(url, timeout=10) as response:
-            img_data = response.read()
+            # Read enough bytes to get dimensions
+            img_data = response.read(65536)  # 64KB should be enough for header
         
-        img = Image.open(BytesIO(img_data))
-        return img.size  # (width, height)
-    except ImportError:
-        # PIL not available, try alternative method
+        dims = get_image_size_from_bytes(img_data)
+        if dims:
+            return dims
+        
+        # Fallback: try PIL if available
+        try:
+            from PIL import Image
+            from io import BytesIO
+            # Need to read full image for PIL
+            with urllib.request.urlopen(url, timeout=10) as response:
+                full_data = response.read()
+            img = Image.open(BytesIO(full_data))
+            return img.size
+        except ImportError:
+            pass
+        
         return None
     except Exception as e:
         print(f'Warning: Could not fetch image dimensions: {e}')
@@ -79,7 +142,15 @@ if 'choices' in data and len(data['choices']) > 0:
     content = data['choices'][0]['message']['content']
     
     # Get actual image dimensions for coordinate conversion
-    img_dims = get_image_dimensions(IMAGE_URL)
+    # Priority: command-line args > auto-detect
+    if CMD_WIDTH and CMD_HEIGHT:
+        try:
+            img_dims = (int(CMD_WIDTH), int(CMD_HEIGHT))
+            print(f'📏 Using provided dimensions: {img_dims[0]} x {img_dims[1]}')
+        except:
+            img_dims = get_image_dimensions(IMAGE_URL)
+    else:
+        img_dims = get_image_dimensions(IMAGE_URL)
     
     print()
     print('=' * 80)

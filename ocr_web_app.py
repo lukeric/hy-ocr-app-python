@@ -5,18 +5,33 @@ Lightweight local web UI for the HunyuanOCR endpoint used in test_simple.sh.
 - Shows progress updates and the raw text (unicode-friendly)
 - Lists detected text blocks with coordinates in a formatted table
 - Renders an annotated image with bounding rectangles in rotating colors
+
+HunyuanOCR Coordinate System:
+-----------------------------
+HunyuanOCR outputs coordinates normalized to a [0, 1000] scale regardless
+of the original image dimensions. This web app automatically converts these
+normalized coordinates to actual pixel coordinates based on the image size.
+
+See ocr_utils.py for reusable coordinate conversion functions.
 """
 
 import base64
 import os
-import re
-from dataclasses import dataclass
 from io import BytesIO
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 from flask import Flask, jsonify, render_template_string, request
 from PIL import Image, ImageDraw, ImageFont
+
+# Import coordinate utilities
+from ocr_utils import (
+    HUNYUAN_COORD_RANGE,
+    TextBlock,
+    convert_blocks_to_pixels,
+    get_scale_factors,
+    parse_ocr_content,
+)
 
 # Flask will emit unicode as-is (no ASCII escaping)
 app = Flask(__name__)
@@ -34,7 +49,7 @@ DEFAULT_PROMPT = os.getenv(
 )
 DEFAULT_IMAGE_URL = os.getenv(
     "HY_OCR_SAMPLE_IMAGE",
-    "https://ev-cuhk.net/tmp/image-771x1024_156936ba.png",
+    "https://ev-cuhk.net/tmp/t01.jpg",
 )
 
 COLOR_PALETTE = [
@@ -49,117 +64,59 @@ COLOR_PALETTE = [
 ]
 
 
-@dataclass
-class TextBlock:
-    text: str
-    top_left: Tuple[float, float]
-    bottom_right: Tuple[float, float]
-    raw_top_left: Tuple[float, float]
-    raw_bottom_right: Tuple[float, float]
-
-    @property
-    def width(self) -> int:
-        return max(0, self.bottom_right[0] - self.top_left[0])
-
-    @property
-    def height(self) -> int:
-        return max(0, self.bottom_right[1] - self.top_left[1])
-
-
-def parse_text_blocks(content: str) -> List[TextBlock]:
-    """Parse text(x1,y1),(x2,y2) style entries from the OCR response content."""
-    pattern = re.compile(
-        r"([^()]+?)\(([-+]?\d+(?:\.\d+)?),([-+]?\d+(?:\.\d+)?)\),\(([-+]?\d+(?:\.\d+)?),([-+]?\d+(?:\.\d+)?)\)"
-    )
-    blocks: List[TextBlock] = []
-    for match in pattern.finditer(content):
-        text = match.group(1).strip()
-        x1, y1, x2, y2 = map(float, match.groups()[1:])
-        blocks.append(
-            TextBlock(
-                text=text,
-                top_left=(x1, y1),
-                bottom_right=(x2, y2),
-                raw_top_left=(x1, y1),
-                raw_bottom_right=(x2, y2),
-            )
-        )
-    return blocks
-
-
-def rescale_blocks_to_image(blocks: List[TextBlock], image_size: Tuple[int, int]) -> List[TextBlock]:
+def fetch_and_annotate_image(
+    image_url: str, 
+    blocks: List[TextBlock],
+    image: Optional[Image.Image] = None,
+) -> Tuple[str, Tuple[int, int]]:
     """
-    The official docs do not clearly state coordinate space. Empirically, the API
-    sometimes returns coordinates on a resized image (smaller than the original).
-    We up-scale to the downloaded image size when we detect a clear mismatch.
+    Download the image (or use provided), draw bounding boxes for each block,
+    and return a base64 data URI for inline display.
+    
+    HunyuanOCR returns coordinates normalized to [0-1000] range. This function
+    converts them to pixel coordinates based on the actual image dimensions.
+    
+    Args:
+        image_url: URL of the image
+        blocks: List of TextBlock objects with normalized coordinates
+        image: Optional pre-loaded PIL Image (to avoid re-downloading)
+        
+    Returns:
+        Tuple of (base64_data_uri, (width, height))
     """
-    if not blocks:
-        return blocks
-
-    img_w, img_h = image_size
-    max_x = max(b.bottom_right[0] for b in blocks)
-    max_y = max(b.bottom_right[1] for b in blocks)
-
-    # If the coordinates look too small compared to the actual image, stretch them.
-    scale_x = img_w / max_x if max_x > 0 and img_w / max_x > 1.1 else 1.0
-    scale_y = img_h / max_y if max_y > 0 and img_h / max_y > 1.1 else 1.0
-
-    if scale_x == 1.0 and scale_y == 1.0:
-        return blocks
-
-    scaled: List[TextBlock] = []
-    for b in blocks:
-        x1 = b.top_left[0] * scale_x
-        y1 = b.top_left[1] * scale_y
-        x2 = b.bottom_right[0] * scale_x
-        y2 = b.bottom_right[1] * scale_y
-        scaled.append(
-            TextBlock(
-                text=b.text,
-                top_left=(x1, y1),
-                bottom_right=(x2, y2),
-                raw_top_left=b.raw_top_left,
-                raw_bottom_right=b.raw_bottom_right,
-            )
-        )
-    return scaled
-
-
-def fetch_and_annotate_image(image_url: str, blocks: List[TextBlock]) -> str:
-    """
-    Download the image, draw bounding boxes for each block, and return a base64
-    data URI for inline display.
-    """
-    response = requests.get(image_url, timeout=20)
-    response.raise_for_status()
-
-    image = Image.open(BytesIO(response.content)).convert("RGB")
+    if image is None:
+        response = requests.get(image_url, timeout=20)
+        response.raise_for_status()
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+    
     # Respect EXIF orientation so coordinates line up with the displayed image
     try:
         from PIL import ImageOps
-
         image = ImageOps.exif_transpose(image)
     except Exception:
         pass
 
-    blocks = rescale_blocks_to_image(blocks, image.size)
+    width, height = image.size
+    
+    # Convert normalized coordinates to pixel coordinates
+    # HunyuanOCR uses [0-1000] normalized range
+    converted_blocks = convert_blocks_to_pixels(blocks, width, height)
+    
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default()
-    width, height = image.size
 
-    for idx, block in enumerate(blocks, 1):
+    for idx, block in enumerate(converted_blocks, 1):
         color = COLOR_PALETTE[(idx - 1) % len(COLOR_PALETTE)]
-        x1_raw, y1_raw = block.top_left
-        x2_raw, y2_raw = block.bottom_right
-
-        # If the model returned normalized coords (0-1), scale them
-        if all(0.0 <= c <= 1.0 for c in (x1_raw, y1_raw, x2_raw, y2_raw)):
-            x1_raw, x2_raw = x1_raw * width, x2_raw * width
-            y1_raw, y2_raw = y1_raw * height, y2_raw * height
+        
+        # Use pixel coordinates (already converted from normalized)
+        x1 = block.pixel_x1 if block.pixel_x1 is not None else 0
+        y1 = block.pixel_y1 if block.pixel_y1 is not None else 0
+        x2 = block.pixel_x2 if block.pixel_x2 is not None else 0
+        y2 = block.pixel_y2 if block.pixel_y2 is not None else 0
 
         # Normalize ordering and clamp to the image bounds
-        x1, x2 = sorted((x1_raw, x2_raw))
-        y1, y2 = sorted((y1_raw, y2_raw))
+        x1, x2 = sorted((x1, x2))
+        y1, y2 = sorted((y1, y2))
         x1 = max(0, min(x1, width - 1))
         y1 = max(0, min(y1, height - 1))
         x2 = max(0, min(x2, width - 1))
@@ -178,7 +135,7 @@ def fetch_and_annotate_image(image_url: str, blocks: List[TextBlock]) -> str:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+    return f"data:image/png;base64,{encoded}", (width, height)
 
 
 def call_ocr(image_url: str):
@@ -219,6 +176,22 @@ def index():
 
 @app.post("/api/ocr")
 def api_ocr():
+    """
+    Process an image through HunyuanOCR and return detected text with coordinates.
+    
+    HunyuanOCR returns coordinates normalized to [0-1000] range. This endpoint
+    converts them to actual pixel coordinates based on the image dimensions.
+    
+    Request body:
+        {"image_url": "https://example.com/image.jpg"}
+        
+    Response includes:
+        - raw_text: The raw OCR output string
+        - blocks: List of detected text blocks with coordinates
+        - image_with_boxes: Base64 annotated image
+        - image_size: Actual image dimensions in pixels
+        - coord_info: Coordinate system information
+    """
     body = request.get_json(force=True, silent=True) or {}
     image_url = (body.get("image_url") or "").strip()
     if not image_url:
@@ -234,69 +207,106 @@ def api_ocr():
         raw_text = ""
         if choices and choices[0].get("message", {}).get("content"):
             raw_text = choices[0]["message"]["content"]
-        blocks = parse_text_blocks(raw_text) if raw_text else []
+        
+        # Parse blocks using utility function (returns normalized coordinates)
+        blocks = parse_ocr_content(raw_text) if raw_text else []
 
         annotated_image = None
-        scaled_blocks: List[TextBlock] = []
-        model_space_w = model_space_h = None
-        scale_x = scale_y = None
+        converted_blocks: List[TextBlock] = []
         image_size = None
+        scale_x = scale_y = None
+        
         if blocks:
-            # Rescale boxes to image dimensions before drawing/returning
+            # Fetch image to get actual dimensions for coordinate conversion
+            steps.append("Fetching image for dimension analysis")
             try:
                 resp = requests.get(image_url, timeout=20)
                 resp.raise_for_status()
                 img = Image.open(BytesIO(resp.content)).convert("RGB")
                 try:
                     from PIL import ImageOps
-
                     img = ImageOps.exif_transpose(img)
                 except Exception:
                     pass
+                
                 image_size = img.size
-                model_space_w = max(b.bottom_right[0] for b in blocks)
-                model_space_h = max(b.bottom_right[1] for b in blocks)
-                scaled_blocks = rescale_blocks_to_image(blocks, img.size)
-                if scaled_blocks:
-                    scale_x = img.size[0] / model_space_w if model_space_w else None
-                    scale_y = img.size[1] / model_space_h if model_space_h else None
-            except Exception:
-                # Fallback: no rescale if we fail to fetch image here
-                scaled_blocks = blocks
+                
+                # Calculate scale factors for normalized -> pixel conversion
+                # HunyuanOCR uses [0-1000] normalized coordinate range
+                scale_x, scale_y = get_scale_factors(img.size[0], img.size[1])
+                
+                # Convert normalized coordinates to pixel coordinates
+                converted_blocks = convert_blocks_to_pixels(blocks, img.size[0], img.size[1])
+                
+                steps.append("Rendering bounding boxes")
+                annotated_image, _ = fetch_and_annotate_image(image_url, blocks, img)
+                
+            except Exception as e:
+                steps.append(f"Warning: Could not fetch image - {e}")
+                # Fallback: use normalized coordinates without conversion
+                converted_blocks = blocks
                 image_size = None
 
-            steps.append("Rendering bounding boxes")
-            annotated_image = fetch_and_annotate_image(image_url, scaled_blocks or blocks)
-
         steps.append("Done")
+        
+        # Build response with both normalized and pixel coordinates
+        blocks_response = []
+        for idx, block in enumerate(converted_blocks):
+            block_data = {
+                "index": idx + 1,
+                "text": block.text,
+                "color": COLOR_PALETTE[idx % len(COLOR_PALETTE)],
+                # Normalized coordinates (0-1000 range from HunyuanOCR)
+                "normalized": {
+                    "x1": block.norm_x1,
+                    "y1": block.norm_y1,
+                    "x2": block.norm_x2,
+                    "y2": block.norm_y2,
+                    "width": block.norm_width,
+                    "height": block.norm_height,
+                },
+            }
+            # Add pixel coordinates if available
+            if block.pixel_x1 is not None:
+                block_data["pixel"] = {
+                    "x1": block.pixel_x1,
+                    "y1": block.pixel_y1,
+                    "x2": block.pixel_x2,
+                    "y2": block.pixel_y2,
+                    "width": block.pixel_width,
+                    "height": block.pixel_height,
+                }
+                # For backwards compatibility, also include at top level
+                block_data["x1"] = block.pixel_x1
+                block_data["y1"] = block.pixel_y1
+                block_data["x2"] = block.pixel_x2
+                block_data["y2"] = block.pixel_y2
+                block_data["width"] = block.pixel_width
+                block_data["height"] = block.pixel_height
+            else:
+                # If no conversion, use normalized values
+                block_data["x1"] = block.norm_x1
+                block_data["y1"] = block.norm_y1
+                block_data["x2"] = block.norm_x2
+                block_data["y2"] = block.norm_y2
+                block_data["width"] = block.norm_width
+                block_data["height"] = block.norm_height
+            
+            blocks_response.append(block_data)
+        
         return (
             jsonify(
                 {
                     "raw_text": raw_text,
-                    "blocks": [
-                        {
-                            "index": idx + 1,
-                            "text": block.text,
-                            "x1": block.top_left[0],
-                            "y1": block.top_left[1],
-                            "x2": block.bottom_right[0],
-                            "y2": block.bottom_right[1],
-                            "width": block.width,
-                            "height": block.height,
-                            "color": COLOR_PALETTE[idx % len(COLOR_PALETTE)],
-                            "raw": {
-                                "x1": block.raw_top_left[0],
-                                "y1": block.raw_top_left[1],
-                                "x2": block.raw_bottom_right[0],
-                                "y2": block.raw_bottom_right[1],
-                            },
-                        }
-                        for idx, block in enumerate(scaled_blocks or blocks)
-                    ],
+                    "blocks": blocks_response,
                     "image_with_boxes": annotated_image,
                     "image_size": {"width": image_size[0], "height": image_size[1]} if image_size else None,
-                    "model_space": {"width": model_space_w, "height": model_space_h},
-                    "scale": {"x": scale_x, "y": scale_y},
+                    "coord_info": {
+                        "normalized_range": HUNYUAN_COORD_RANGE,
+                        "scale_x": scale_x,
+                        "scale_y": scale_y,
+                        "description": f"HunyuanOCR outputs coordinates normalized to [0-{HUNYUAN_COORD_RANGE}] range",
+                    },
                     "steps": steps,
                     "endpoint": OCR_ENDPOINT,
                     "model": OCR_MODEL,
@@ -497,7 +507,10 @@ PAGE_TEMPLATE = r"""
     </div>
 
     <div class="panel">
-      <strong>Detected Text Blocks</strong>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <strong>Detected Text Blocks</strong>
+        <div id="coord-info" class="pill" style="font-size:12px;"></div>
+      </div>
       <div id="table-container"></div>
     </div>
 
@@ -515,6 +528,7 @@ PAGE_TEMPLATE = r"""
     const statusLabel = document.getElementById("status-label");
     const rawTextEl = document.getElementById("raw-text");
     const tableContainer = document.getElementById("table-container");
+    const coordInfo = document.getElementById("coord-info");
     const annotatedImg = document.getElementById("annotated-image");
     const urlInput = document.getElementById("image-url");
 
@@ -533,26 +547,75 @@ PAGE_TEMPLATE = r"""
     function clearOutputs() {
       rawTextEl.textContent = "";
       tableContainer.innerHTML = "";
+      coordInfo.innerHTML = "";
       annotatedImg.src = "";
     }
 
-    function renderTable(blocks=[]) {
+    function renderCoordInfo(info, imageSize) {
+      if (!info) {
+        coordInfo.innerHTML = "";
+        return;
+      }
+      let html = `<span class="dot" style="background:#22c55e;"></span>`;
+      if (imageSize) {
+        html += `Image: ${imageSize.width}×${imageSize.height}px`;
+      }
+      if (info.scale_x && info.scale_y) {
+        html += ` | Scale: ${info.scale_x.toFixed(3)}×${info.scale_y.toFixed(3)}`;
+      }
+      html += ` | Norm: 0-${info.normalized_range}`;
+      coordInfo.innerHTML = html;
+    }
+
+    function renderTable(blocks=[], hasPixelCoords=false) {
       if (!blocks.length) {
         tableContainer.innerHTML = '<div style="color: var(--muted);">No blocks detected.</div>';
         return;
       }
-      const rows = blocks.map(block => `
-        <tr>
-          <td style="width:60px;"><span class="tag" style="border-color:${block.color}; color:${block.color};">#${block.index}</span></td>
-          <td>${block.text || "&nbsp;"}</td>
-          <td><div class="tag">(${block.x1},${block.y1}) → (${block.x2},${block.y2})</div></td>
-          <td><div class="tag">w:${block.width}, h:${block.height}</div></td>
-        </tr>
-      `).join("");
+      
+      // Build table with both normalized and pixel coordinates if available
+      const rows = blocks.map(block => {
+        const norm = block.normalized || {};
+        const pixel = block.pixel || {};
+        const hasPixel = pixel.x1 !== undefined;
+        
+        let coordCell = "";
+        if (hasPixel) {
+          coordCell = `
+            <div class="tag" style="margin-bottom:4px;" title="Pixel coordinates">
+              📍 (${Math.round(pixel.x1)},${Math.round(pixel.y1)}) → (${Math.round(pixel.x2)},${Math.round(pixel.y2)})
+            </div>
+            <div class="tag" style="font-size:11px; opacity:0.7;" title="Normalized 0-1000">
+              📐 (${Math.round(norm.x1)},${Math.round(norm.y1)}) → (${Math.round(norm.x2)},${Math.round(norm.y2)})
+            </div>
+          `;
+        } else {
+          coordCell = `<div class="tag">(${Math.round(norm.x1)},${Math.round(norm.y1)}) → (${Math.round(norm.x2)},${Math.round(norm.y2)})</div>`;
+        }
+        
+        const sizeCell = hasPixel 
+          ? `<div class="tag">${Math.round(pixel.width)}×${Math.round(pixel.height)}px</div>`
+          : `<div class="tag">${Math.round(norm.width)}×${Math.round(norm.height)}</div>`;
+        
+        return `
+          <tr>
+            <td style="width:60px;"><span class="tag" style="border-color:${block.color}; color:${block.color};">#${block.index}</span></td>
+            <td>${block.text || "&nbsp;"}</td>
+            <td>${coordCell}</td>
+            <td>${sizeCell}</td>
+          </tr>
+        `;
+      }).join("");
+      
       tableContainer.innerHTML = `
         <table>
           <thead>
-            <tr><th>Id</th><th>Text</th><th>Coordinates</th><th>Size</th></tr>
+            <tr>
+              <th>Id</th>
+              <th>Text</th>
+              <th>Coordinates<br><small style="font-weight:normal;color:var(--muted);">📍 Pixel / 📐 Normalized</small></th>
+              <th>Size</th>
+            </tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
@@ -585,7 +648,14 @@ PAGE_TEMPLATE = r"""
 
         appendSteps(payload.steps);
         rawTextEl.textContent = payload.raw_text || "";
-        renderTable(payload.blocks || []);
+        
+        // Render coordinate info
+        renderCoordInfo(payload.coord_info, payload.image_size);
+        
+        // Render table with both normalized and pixel coords
+        const hasPixelCoords = payload.blocks?.length > 0 && payload.blocks[0].pixel;
+        renderTable(payload.blocks || [], hasPixelCoords);
+        
         if (payload.image_with_boxes) {
           annotatedImg.src = payload.image_with_boxes;
         } else {
