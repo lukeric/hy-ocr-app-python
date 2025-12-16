@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-ddd6b959-8dd3-42d2-9a2c-c6b14204235b",
+  "object": "chat.completion",
+  "created": 1765804640,
+  "model": "/app/models/HunyuanOCR",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "錄音/訪問(53,27),(139,55)內容名稱(18,116),(69,138)報讀課程(90,116),(142,138)難度(253,116),(280,138)錄音指示(42,199),(120,232)教育學院有甚麼課程可以報讀？請說出其中兩個課程(64,323),(367,345)評分標準(42,449),(121,481)若需啓用AI自動評估功能，請輸入「正確答案」。「排除答案」及「其他指引」可按需要填寫，以提升AI自動評估的準確性。(42,525),(748,548)正確答案(54,581),(93,598)排除答案(510,581),(549,598)任何教育學碩士或教育學博士也算正確(65,607),(289,629)其他與教育無關的課程(522,607),(654,629)其他指引(53,752),(105,774)取消(876,936),(898,955)更新(935,935),(958,955)",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 3484,
+    "total_tokens": 3804,
+    "completion_tokens": 320,
+    "prompt_tokens_details": null
+  },
+  "prompt_logprobs": null,
+  "prompt_token_ids": null,
+  "kv_transfer_params": null
+}
