@@ -16,8 +16,10 @@ See ocr_utils.py for reusable coordinate conversion functions.
 """
 
 import base64
+import json
 import os
 from io import BytesIO
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import requests
@@ -62,6 +64,30 @@ COLOR_PALETTE = [
     "#d97706",
     "#10b981",
 ]
+
+# Settings persistence
+SETTINGS_FILE = Path(__file__).parent / "ocr_settings.json"
+
+
+def load_settings():
+    """Load saved settings from JSON file."""
+    if SETTINGS_FILE.exists():
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_settings(settings):
+    """Save settings to JSON file."""
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
 
 
 def fetch_and_annotate_image(
@@ -138,8 +164,11 @@ def fetch_and_annotate_image(
     return f"data:image/png;base64,{encoded}", (width, height)
 
 
-def call_ocr(image_url: str):
+def call_ocr(image_url: str, prompt: str = None):
     """Call the OCR endpoint and return the JSON payload."""
+    if prompt is None:
+        prompt = DEFAULT_PROMPT
+    
     payload = {
         "model": OCR_MODEL,
         "messages": [
@@ -147,14 +176,14 @@ def call_ocr(image_url: str):
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": DEFAULT_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],
         "temperature": 0.0,
         "top_k": 1,
-        "repetition_penalty": 1.0,
-        "max_tokens": 3000,
+        "repetition_penalty": 1.2,  # Added penalty to prevent repetition loops
+        "max_tokens": 8192,  # Doubled for very dense text (200+ blocks, leaves room for ~8000 image tokens)
     }
     response = requests.post(
         f"{OCR_ENDPOINT}/chat/completions", json=payload, timeout=(10, 120)
@@ -165,13 +194,27 @@ def call_ocr(image_url: str):
 
 @app.route("/")
 def index():
+    """Render the main page with saved settings."""
+    settings = load_settings()
     return render_template_string(
         PAGE_TEMPLATE,
-        default_url=DEFAULT_IMAGE_URL,
+        default_url=settings.get("image_url", DEFAULT_IMAGE_URL),
         endpoint=OCR_ENDPOINT,
         model=OCR_MODEL,
-        prompt=DEFAULT_PROMPT,
+        prompt=settings.get("prompt", DEFAULT_PROMPT),
     )
+
+
+@app.post("/api/settings")
+def api_save_settings():
+    """Save user settings (image URL and prompt)."""
+    body = request.get_json(force=True, silent=True) or {}
+    settings = {
+        "image_url": body.get("image_url", ""),
+        "prompt": body.get("prompt", ""),
+    }
+    success = save_settings(settings)
+    return jsonify({"success": success}), 200 if success else 500
 
 
 @app.post("/api/ocr")
@@ -183,7 +226,10 @@ def api_ocr():
     converts them to actual pixel coordinates based on the image dimensions.
     
     Request body:
-        {"image_url": "https://example.com/image.jpg"}
+        {
+            "image_url": "https://example.com/image.jpg",
+            "prompt": "Optional custom prompt"
+        }
         
     Response includes:
         - raw_text: The raw OCR output string
@@ -194,13 +240,18 @@ def api_ocr():
     """
     body = request.get_json(force=True, silent=True) or {}
     image_url = (body.get("image_url") or "").strip()
+    prompt = (body.get("prompt") or "").strip()
+    
     if not image_url:
         return jsonify({"error": "image_url is required"}), 400
+    
+    # Save settings for next time
+    save_settings({"image_url": image_url, "prompt": prompt or DEFAULT_PROMPT})
 
     steps = ["Received request"]
     try:
         steps.append("Calling OCR endpoint")
-        ocr_json = call_ocr(image_url)
+        ocr_json = call_ocr(image_url, prompt or None)
 
         steps.append("Parsing OCR response")
         choices = ocr_json.get("choices") or []
@@ -373,7 +424,7 @@ PAGE_TEMPLATE = r"""
       font-weight: 600;
       margin-bottom: 8px;
     }
-    input[type="url"] {
+    input[type="url"], textarea {
       width: 100%;
       padding: 12px 14px;
       border-radius: 10px;
@@ -381,6 +432,11 @@ PAGE_TEMPLATE = r"""
       background: #0b1220;
       color: #e2e8f0;
       font-size: 15px;
+      font-family: inherit;
+    }
+    textarea {
+      resize: vertical;
+      min-height: 80px;
     }
     button {
       background: var(--accent);
@@ -484,9 +540,25 @@ PAGE_TEMPLATE = r"""
     <div class="panel">
       <label for="image-url">Image URL</label>
       <input type="url" id="image-url" value="{{ default_url }}" placeholder="Paste an image URL">
+      
+      <div style="margin-top:16px;">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" rows="3" placeholder="Enter OCR prompt">{{ prompt }}</textarea>
+      </div>
+      
       <button id="run-btn">Run OCR</button>
-      <div style="margin-top:10px; color: var(--muted); font-size: 13px;">
-        Prompt: {{ prompt }}
+    </div>
+    
+    <div class="panel">
+      <strong>Image Preview</strong>
+      <div style="margin-top:10px; position:relative;">
+        <img id="preview-image" class="annotated" alt="Image preview will appear here" style="display:none;">
+        <div id="preview-error" style="display:none; padding:20px; text-align:center; color:var(--danger); border:1px dashed var(--border); border-radius:12px; background:#0b1220;">
+          ⚠️ Failed to load image
+        </div>
+        <div id="preview-loading" style="padding:20px; text-align:center; color:var(--muted); border:1px dashed var(--border); border-radius:12px; background:#0b1220;">
+          📷 Enter an image URL to preview
+        </div>
       </div>
     </div>
 
@@ -531,6 +603,10 @@ PAGE_TEMPLATE = r"""
     const coordInfo = document.getElementById("coord-info");
     const annotatedImg = document.getElementById("annotated-image");
     const urlInput = document.getElementById("image-url");
+    const promptInput = document.getElementById("prompt");
+    const previewImg = document.getElementById("preview-image");
+    const previewError = document.getElementById("preview-error");
+    const previewLoading = document.getElementById("preview-loading");
 
     function setStatus(message, type="info") {
       const colorClass = type === "error" ? "err" : "ok";
@@ -549,6 +625,41 @@ PAGE_TEMPLATE = r"""
       tableContainer.innerHTML = "";
       coordInfo.innerHTML = "";
       annotatedImg.src = "";
+    }
+    
+    function loadImagePreview() {
+      const imageUrl = urlInput.value.trim();
+      
+      // Hide all preview states
+      previewImg.style.display = "none";
+      previewError.style.display = "none";
+      previewLoading.style.display = "none";
+      
+      if (!imageUrl) {
+        previewLoading.textContent = "📷 Enter an image URL to preview";
+        previewLoading.style.display = "block";
+        return;
+      }
+      
+      // Show loading state
+      previewLoading.textContent = "⏳ Loading image...";
+      previewLoading.style.display = "block";
+      
+      // Load image
+      const img = new Image();
+      
+      img.onload = function() {
+        previewLoading.style.display = "none";
+        previewImg.src = imageUrl;
+        previewImg.style.display = "block";
+      };
+      
+      img.onerror = function() {
+        previewLoading.style.display = "none";
+        previewError.style.display = "block";
+      };
+      
+      img.src = imageUrl;
     }
 
     function renderCoordInfo(info, imageSize) {
@@ -624,6 +735,8 @@ PAGE_TEMPLATE = r"""
 
     async function runOcr() {
       const imageUrl = urlInput.value.trim();
+      const prompt = promptInput.value.trim();
+      
       if (!imageUrl) {
         setStatus("Please provide an image URL", "error");
         return;
@@ -637,7 +750,10 @@ PAGE_TEMPLATE = r"""
         const response = await fetch("/api/ocr", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image_url: imageUrl })
+          body: JSON.stringify({ 
+            image_url: imageUrl,
+            prompt: prompt 
+          })
         });
         const payload = await response.json();
         if (!response.ok) {
@@ -672,6 +788,16 @@ PAGE_TEMPLATE = r"""
     runBtn.addEventListener("click", (e) => {
       e.preventDefault();
       runOcr();
+    });
+    
+    // Load image preview when URL changes
+    urlInput.addEventListener("input", () => {
+      loadImagePreview();
+    });
+    
+    // Load image preview on page load
+    window.addEventListener("DOMContentLoaded", () => {
+      loadImagePreview();
     });
   </script>
 </body>
