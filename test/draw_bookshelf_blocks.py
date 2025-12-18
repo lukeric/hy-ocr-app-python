@@ -48,8 +48,13 @@ def normalized_to_pixel(norm_coord, pixel_size):
 def draw_blocks(image_filename="pexels-photo-1370295.jpeg", json_filename="bookshelf_blocks.json"):
     """Draw compartment blocks on the image."""
     
-    # Load the JSON data
-    json_path = Path(__file__).parent / json_filename
+    # Load the JSON data - handle both absolute and relative paths
+    json_path = Path(json_filename)
+    if not json_path.is_absolute():
+        # If relative, try current directory first, then script directory
+        if not json_path.exists():
+            json_path = Path(__file__).parent / json_filename
+    
     with open(json_path, 'r') as f:
         data = json.load(f)
     
@@ -70,8 +75,13 @@ def draw_blocks(image_filename="pexels-photo-1370295.jpeg", json_filename="books
     else:
         raise ValueError("JSON must be a list or dict")
     
-    # Load the image
-    img_path = Path(__file__).parent / image_filename
+    # Load the image - handle both absolute and relative paths
+    img_path = Path(image_filename)
+    if not img_path.is_absolute():
+        # If relative, try current directory first, then script directory
+        if not img_path.exists():
+            img_path = Path(__file__).parent / image_filename
+    
     if not img_path.exists():
         raise FileNotFoundError(f"Image not found: {img_path}")
     
@@ -152,9 +162,17 @@ def draw_blocks(image_filename="pexels-photo-1370295.jpeg", json_filename="books
     
     # Save the output
     # Generate output filename: input.jpg -> input_annotated.jpg
-    input_stem = Path(image_filename).stem
+    # Save in the same directory as the input image
+    input_path = Path(image_filename)
+    input_stem = input_path.stem
     output_filename = f"{input_stem}_annotated.jpg"
-    output_path = Path(__file__).parent / output_filename
+    
+    # Save in the same directory as the input image
+    if input_path.parent.exists():
+        output_path = input_path.parent / output_filename
+    else:
+        output_path = Path.cwd() / output_filename
+    
     image.save(output_path, format="JPEG", quality=95)
     
     print(f"\n✅ Saved annotated image to: {output_path}")

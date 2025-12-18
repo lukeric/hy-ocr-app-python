@@ -1,0 +1,19 @@
+Analyze the uploaded image of the bookshelf to detect its storage compartments.
+
+**Task:**
+1.  **Structure Detection:** Automatically identify the grid layout by detecting horizontal shelves and vertical dividers. Do not assume a fixed number of rows or columns; derive them from the visual evidence.
+2.  **Bounding Boxes:** For each distinct compartment detected, define a bounding box that encloses the contents (books/items).
+3.  **Separation:** Ensure the bounding boxes do **not** overlap with the physical structure (wooden/metal dividers or shelf thickness). The boxes should represent the *inner* usable space of each compartment.
+
+**Output Requirements:**
+* Output **JSON only** (no markdown text, no explanations).
+* The JSON must be a flat list of objects.
+* Use the keys: `"label"`, `"x1"`, `"y1"`, `"x2"`, `"y2"`.
+* **Coordinate System:** Use normalized coordinates on a **0 to 1000 scale** (where 0,0 is top-left and 1000,1000 is bottom-right).
+* For the label, use a generic format like "rowX_colY" based on the detected grid position.
+
+**Example Output Format:**
+[
+  {"label": "row1_col1", "x1": 10, "y1": 10, "x2": 200, "y2": 150},
+  {"label": "row1_col2", "x1": 210, "y1": 10, "x2": 400, "y2": 150}
+]
